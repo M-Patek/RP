@@ -1,8 +1,22 @@
-fastapi==0.108.0
-uvicorn==0.25.0
-pydantic==2.5.3
-curl_cffi==0.6.2
-redis==5.0.1
+Core Framework
+
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+pydantic>=2.6.0
+python-dotenv>=1.0.0
 python-multipart>=0.0.9
-prometheus-fastapi-instrumentator
-python-dotenv
+
+Database & Metrics
+
+redis>=5.0.1
+prometheus-fastapi-instrumentator>=7.0.0
+
+HTTP Clients (Dual Support)
+
+Cloud: Anti-fingerprint requests (Docker/Linux)
+
+curl_cffi>=0.6.2
+
+Local: Windows compatible requests
+
+aiohttp>=3.9.0

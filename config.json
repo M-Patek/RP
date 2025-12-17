@@ -1,16 +1,24 @@
 [
   {
-    "comment": "Slot 1: Premium ISP - High Capacity",
-    "key": "AIzaSyDxxxx_Key_1",
-    "proxy": "http://user:pass@1.2.3.4:8000",
+    "comment": "Slot 1: 美国洛杉矶 (US-LAX) - 严格绑定地域特征",
+    "key": "AIzaSyDxxxx_Key_LAX",
+    "proxy": "http://user:pass@lax-isp.proxy.net:8000",
     "impersonate": "chrome110",
-    "max_concurrency": 10
+    "max_concurrency": 8,
+    "headers": {
+      "Accept-Language": "en-US,en;q=0.9",
+      "X-Timezone": "America/Los_Angeles" 
+    }
   },
   {
-    "comment": "Slot 2: Standard ISP",
-    "key": "AIzaSyDxxxx_Key_2",
-    "proxy": "http://user:pass@5.6.7.8:8000",
+    "comment": "Slot 2: 日本东京 (JP-TYO) - 严格绑定地域特征",
+    "key": "AIzaSyDxxxx_Key_TYO",
+    "proxy": "http://user:pass@tyo-isp.proxy.net:8000",
     "impersonate": "safari15_5",
-    "max_concurrency": 3
+    "max_concurrency": 5,
+    "headers": {
+      "Accept-Language": "ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7",
+      "X-Timezone": "Asia/Tokyo"
+    }
   }
 ]

@@ -1,9 +1,8 @@
 fastapi==0.108.0
 uvicorn==0.25.0
 pydantic==2.5.3
-# 锁定版本以确保 TLS 指纹库的稳定性，避免自动升级导致指纹变动
 curl_cffi==0.6.2
 redis==5.0.1
-# 修复 ReDoS/DoS 漏洞 (原 0.0.6 存在风险)
 python-multipart>=0.0.9
 prometheus-fastapi-instrumentator
+python-dotenv

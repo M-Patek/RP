@@ -7,6 +7,7 @@ import asyncio
 import signal
 import time
 import hashlib
+import math
 from typing import AsyncGenerator, Optional, Dict, List
 from collections import OrderedDict
 from contextlib import asynccontextmanager
@@ -36,13 +37,24 @@ REDIS_CLIENT: Optional[AsyncRedis] = None
 FRAME_DELIMITER = b"\n"
 SESSION_TTL = 300
 UPSTREAM_URL = "https://gemini-cli-backend.googleapis.com/v1/generate"
-MAX_RETRIES = 3            # 最大故障重试次数
-CIRCUIT_BREAKER_TIME = 60  # 熔断冷却时间 (秒)
-KEEP_ALIVE_INTERVAL = 15   # 流式心跳间隔 (秒)
-DEFAULT_CONCURRENCY = 5    # 单 Key 默认并发限制
+MAX_RETRIES = 3             # 最大故障重试次数
+BASE_COOL_DOWN = 60         # 基础熔断冷却时间 (秒)
+MAX_COOL_DOWN = 3600        # 最大熔断冷却时间 (1小时)
+KEEP_ALIVE_INTERVAL = 15    # 流式心跳间隔 (秒)
+DEFAULT_CONCURRENCY = 5     # 单 Key 默认并发限制
+WARMUP_PERIOD = 300         # 预热期 (秒)，新 Slot 在此前期间并发受限
 
 # 安全认证 Token (为空则不开启)
 GATEWAY_SECRET = os.getenv("GATEWAY_SECRET")
+
+# --- 智能指纹库 (User-Agent 映射) ---
+# 确保 UA 与 TLS 指纹 (impersonate) 严格对应，减少指纹冲突风险
+UA_MAPPING = {
+    "chrome110": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36",
+    "chrome100": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.4896.127 Safari/537.36",
+    "safari15_5": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.5 Safari/605.1.15",
+    "edge101": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/101.0.4951.64 Safari/537.36 Edg/101.0.1210.53"
+}
 
 # --- 1. 资源管理与热重载 ---
 
@@ -54,16 +66,34 @@ def load_resource_pool():
             with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
                 new_pool = json.load(f)
             
-            # 初始化运行时状态 (保留原有状态或重置)
+            # 初始化运行时状态
             RESOURCE_POOL = new_pool
-            # 为每个 Slot 建立索引 ID，方便状态追踪
+            now = time.time()
+            
+            # 重新建立索引，保留旧状态或初始化新状态
+            # 使用 Key 的 Hash 作为持久化标识，防止重载配置导致状态丢失
+            new_slot_state = {}
             for idx, slot in enumerate(RESOURCE_POOL):
-                if idx not in SLOT_STATE:
-                    SLOT_STATE[idx] = {
+                key_hash = hashlib.md5(slot['key'].encode()).hexdigest()
+                
+                # 尝试从旧状态中恢复 (如果在运行中热重载)
+                existing_state = None
+                for old_idx, old_state in SLOT_STATE.items():
+                    if old_state.get("concurrency_key") == key_hash:
+                        existing_state = old_state
+                        break
+                
+                if existing_state:
+                    new_slot_state[idx] = existing_state
+                else:
+                    new_slot_state[idx] = {
                         "failures": 0,
                         "next_retry_ts": 0,
-                        "concurrency_key": hashlib.md5(slot['key'].encode()).hexdigest()
+                        "concurrency_key": key_hash,
+                        "enabled_ts": now  # 记录启用时间用于预热逻辑
                     }
+            
+            SLOT_STATE = new_slot_state
             logger.info(f"[Config] Loaded {len(RESOURCE_POOL)} slots. Hot reload complete.")
         else:
             logger.warning("[Config] config.json not found. Waiting for mount...")
@@ -98,9 +128,9 @@ async def get_redis_client():
 async def acquire_slot() -> int:
     """
     智能选择一个健康的 Slot：
-    1. 过滤掉处于熔断期 (Cool-down) 的 Slot。
-    2. 检查 Redis 并发计数 (Soft Limit)。
-    3. 从剩余可用 Slot 中随机选择。
+    1. 熔断过滤：跳过处于冷却期的 Slot。
+    2. 预热限制：新 Slot 并发能力缓慢爬坡。
+    3. 软限流：Redis 全局并发计数检查。
     """
     if not RESOURCE_POOL:
         raise HTTPException(status_code=503, detail="Resource pool is empty.")
@@ -117,34 +147,43 @@ async def acquire_slot() -> int:
         healthy_indices.append(idx)
 
     if not healthy_indices:
-        # 如果全部熔断，尝试强制复活一个等待时间最短的
         logger.warning("All slots circuit-broken. Forcing retry on earliest.")
         return min(range(len(RESOURCE_POOL)), key=lambda i: SLOT_STATE[i]["next_retry_ts"])
 
-    # 第二轮筛选：Redis 并发限制 (为了性能，随机选几个检查，而不是全部检查)
-    # 避免惊群效应和 Redis 压力，我们随机打散检查顺序
+    # 第二轮筛选：Redis 并发限制 + 预热逻辑
     random.shuffle(healthy_indices)
-    
     selected_idx = -1
     
     for idx in healthy_indices:
         state = SLOT_STATE[idx]
         conc_key = f"concurrency:{state['concurrency_key']}"
-        limit = RESOURCE_POOL[idx].get("max_concurrency", DEFAULT_CONCURRENCY)
         
+        # 获取配置的最大并发
+        base_limit = RESOURCE_POOL[idx].get("max_concurrency", DEFAULT_CONCURRENCY)
+        
+        # --- 预热逻辑 (Warming Up) ---
+        # 如果 Slot 刚启用不久，限制其最大并发数
+        enabled_duration = now - state.get("enabled_ts", now)
+        if enabled_duration < WARMUP_PERIOD:
+            # 线性增长：从 1 到 base_limit
+            warmup_factor = max(0.2, enabled_duration / WARMUP_PERIOD)
+            effective_limit = max(1, int(base_limit * warmup_factor))
+        else:
+            effective_limit = base_limit
+            
         # 检查当前并发
         current = await redis.get(conc_key)
-        if current and int(current) >= limit:
-            continue # 该 Key 太忙，跳过
+        if current and int(current) >= effective_limit:
+            continue # 该 Key 太忙 (或处于预热限制中)，跳过
             
         selected_idx = idx
         break
     
-    # 如果所有健康的都满了，随机回退到一个健康的（降级策略）
+    # 降级策略：如果所有健康的都满了，随机选一个健康的（允许轻微超限）
     if selected_idx == -1:
         selected_idx = random.choice(healthy_indices)
 
-    # 预增加并发计数 (有效期 60秒，防止死锁)
+    # 预增加并发计数
     conc_key = f"concurrency:{SLOT_STATE[selected_idx]['concurrency_key']}"
     await redis.incr(conc_key)
     await redis.expire(conc_key, 60) 
@@ -159,14 +198,18 @@ async def release_slot(idx: int):
     conc_key = f"concurrency:{state['concurrency_key']}"
     await redis.decr(conc_key)
 
-def mark_slot_failure(idx: int):
-    """触发熔断机制"""
+def mark_slot_failure(idx: int, status_code: int = 0):
+    """触发熔断机制 (指数退避)"""
     state = SLOT_STATE[idx]
     state["failures"] += 1
-    # 指数退避：失败次数越多，冷却越久 (60s, 120s, 180s...)
-    backoff = CIRCUIT_BREAKER_TIME * min(state["failures"], 5) 
+    
+    # 指数退避算法：Failures越多，冷却越久
+    # 429/403 惩罚更重
+    multiplier = 2 if status_code in [429, 403] else 1
+    backoff = min(MAX_COOL_DOWN, BASE_COOL_DOWN * (2 ** (state["failures"] - 1)) * multiplier)
+    
     state["next_retry_ts"] = time.time() + backoff
-    logger.warning(f"Slot {idx} Circuit Broken! Cooling down for {backoff}s. (Failures: {state['failures']})")
+    logger.warning(f"Slot {idx} Circuit Broken! Status: {status_code}. Cooling for {backoff}s. (Failures: {state['failures']})")
 
 def mark_slot_success(idx: int):
     """恢复健康状态"""
@@ -179,12 +222,10 @@ def mark_slot_success(idx: int):
 
 async def frame_processor(resp: AsyncSession, session_id: str) -> AsyncGenerator[str, None]:
     """
-    增强版流处理器：
-    1. 智能拆包
-    2. Keep-Alive 心跳保活
+    增强版流处理器：Keep-Alive 心跳保活
     """
     buffer = b""
-    iterator = resp.aiter_content(chunk_size=None).__aiter__() # 让 curl_cffi 自动管理最佳 chunk size
+    iterator = resp.aiter_content(chunk_size=None).__aiter__()
     
     while True:
         try:
@@ -196,14 +237,12 @@ async def frame_processor(resp: AsyncSession, session_id: str) -> AsyncGenerator
                 line, buffer = buffer.split(FRAME_DELIMITER, 1)
                 if not line.strip(): continue
                 
-                # 此处调用之前的转换逻辑 (为节省篇幅假设 transform_cli_to_standard 已定义)
                 transformed = await transform_cli_to_standard(line, session_id) 
                 if transformed:
                     yield f"data: {json.dumps(transformed)}\n\n"
                     
         except asyncio.TimeoutError:
-            # 超时未收到上游数据，发送 SSE 注释作为心跳 (Keep-Alive)
-            # 这不会破坏 JSON 结构，但能保持 HTTP 连接活跃
+            # 发送 SSE 注释保活
             yield ": keep-alive\n\n"
             continue
         except StopAsyncIteration:
@@ -213,7 +252,6 @@ async def frame_processor(resp: AsyncSession, session_id: str) -> AsyncGenerator
             yield f"data: {json.dumps({'error': str(e)})}\n\n"
             break
 
-    # 处理剩余 buffer
     if buffer.strip():
         transformed = await transform_cli_to_standard(buffer, session_id)
         if transformed:
@@ -221,32 +259,32 @@ async def frame_processor(resp: AsyncSession, session_id: str) -> AsyncGenerator
             
     yield "data: [DONE]\n\n"
 
-
-# --- 5. 辅助功能 (Tool Logic 复用原代码) ---
-# ... (此处省略 record_tool_calls, check_and_get_pending_calls 等 Redis 逻辑，与之前一致) ...
-# 为了完整性，这里必须包含这些函数，请将之前提供的 transform_standard_to_cli 等函数粘贴于此
-# ---------------------------------------------------------------------------
+# --- 5. 辅助功能 (Tool Logic) ---
+# ... (Redis 状态逻辑省略，保持不变) ...
 async def get_session_id_from_request(request: Request) -> str:
-    # ... (保持不变) ...
     return request.headers.get("X-Session-ID") or str(uuid.uuid4())
 
+# Mock for compilation purposes, replace with actual logic
 async def transform_standard_to_cli(data: dict, session_id: str) -> bytes:
-    # ... (保持不变) ...
-    # 简化的 Mock，实际请使用之前提供的完整逻辑
     return json.dumps({"contents": [{"parts": [{"text": data.get("prompt", "")}]}]}).encode()
 
 async def transform_cli_to_standard(raw_line: bytes, session_id: str) -> dict:
-    # ... (保持不变) ...
-    # 简化的 Mock，实际请使用之前提供的完整逻辑
-    try:
-        return {"choices": [{"delta": {"content": "..."}}]}
+    try: return {"choices": [{"delta": {"content": "..."}}]} 
     except: return {}
-# ---------------------------------------------------------------------------
 
+# --- 6. 后台健康审计 ---
 
-# --- 6. FastAPI 应用入口 ---
+async def background_health_monitor():
+    """定期审计 Slot 状态，自动报警"""
+    while True:
+        await asyncio.sleep(60) # 每分钟检查一次
+        for idx, state in SLOT_STATE.items():
+            if state["failures"] >= 5:
+                logger.error(f"[Audit] Slot {idx} is UNHEALTHY! Continuous failures: {state['failures']}. Please check IP.")
 
-app = FastAPI(title="Gemini Industrial Gateway")
+# --- 7. FastAPI 应用入口 ---
+
+app = FastAPI(title="Gemini Tactical Gateway")
 Instrumentator().instrument(app).expose(app)
 
 # 安全中间件
@@ -260,12 +298,12 @@ async def verify_auth(request: Request):
 async def startup_event():
     load_resource_pool()
     await get_redis_client()
-    logger.info(">>> Gateway Started. Monitoring Signals...")
+    asyncio.create_task(background_health_monitor()) # 启动后台审计
+    logger.info(">>> Tactical Gateway Started. Systems Online.")
 
 @app.post("/v1/chat/completions", dependencies=[Depends(verify_auth)])
 async def reverse_proxy_endpoint(request: Request):
     
-    # 1. 预处理请求
     try:
         body = await request.json()
         session_id = await get_session_id_from_request(request)
@@ -273,37 +311,49 @@ async def reverse_proxy_endpoint(request: Request):
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Bad Request: {e}")
 
-    # 2. 自动故障转移循环 (Failover Loop)
+    # 1. 流量碎片化 (Traffic Fragmentation)
+    # 引入 50ms-200ms 的随机延迟，打破机器请求的机械节奏
+    await asyncio.sleep(random.uniform(0.05, 0.2))
+
     last_error = None
     
     for attempt in range(MAX_RETRIES):
         slot_idx = -1
         try:
-            # 3. 获取资源槽 (包含软限流逻辑)
             slot_idx = await acquire_slot()
             slot = RESOURCE_POOL[slot_idx]
             
+            # --- 动态行为仿真配置 ---
             current_impersonate = slot.get("impersonate", "chrome110")
             current_proxy = slot.get("proxy")
             current_key = slot.get("key")
             
+            # 自动匹配 User-Agent
+            user_agent = slot.get("user_agent") or UA_MAPPING.get(current_impersonate, UA_MAPPING["chrome110"])
+            
             proxies = {"http": current_proxy, "https": current_proxy} if current_proxy else None
             
-            logger.info(f"[Request] Sess:{session_id} | Try:{attempt+1}/{MAX_RETRIES} | Slot:{slot_idx} ({current_impersonate})")
+            logger.info(f"[Request] Sess:{session_id} | Try:{attempt+1} | Slot:{slot_idx} ({current_impersonate})")
 
             # 4. 发起请求
             async with AsyncSession(
                 impersonate=current_impersonate,
                 proxies=proxies,
-                timeout=120 # 总超时
+                timeout=120
             ) as session:
+                
+                # --- 多维特征解耦 (Header Injection) ---
+                # 注入 Slot 特定的 Header (如时区、语言) 以匹配 IP 地理位置
+                custom_headers = slot.get("headers", {})
                 
                 headers = OrderedDict([
                     ("Host", "gemini-cli-backend.googleapis.com"),
                     ("X-Goog-Api-Key", current_key), 
-                    ("User-Agent", "Gemini-CLI/1.0"), 
+                    ("User-Agent", user_agent), # 使用严格匹配的 UA
                     ("Content-Type", "application/json"),
                 ])
+                # 合并自定义 Headers (覆盖默认值)
+                headers.update(custom_headers)
 
                 resp = await session.post(
                     url=UPSTREAM_URL,
@@ -312,23 +362,17 @@ async def reverse_proxy_endpoint(request: Request):
                     stream=True
                 )
 
-                # 5. 状态检查
-                if resp.status_code == 403 or resp.status_code == 429:
-                    # 关键：鉴权失败或限流，立即熔断该 Slot
-                    logger.warning(f"Slot {slot_idx} returned {resp.status_code}. Marking as failed.")
-                    mark_slot_failure(slot_idx)
+                # 5. 状态检查与智能熔断
+                if resp.status_code in [403, 429]:
+                    logger.warning(f"Slot {slot_idx} denied ({resp.status_code}). Triggering Exponential Backoff.")
+                    # 传递状态码以触发更严厉的熔断
+                    mark_slot_failure(slot_idx, status_code=resp.status_code)
                     raise HTTPException(status_code=resp.status_code, detail="Auth/Rate Limit")
                 
                 if resp.status_code != 200:
                     raise HTTPException(status_code=resp.status_code, detail="Upstream Error")
 
-                # 6. 请求成功，标记状态并开始流式传输
                 mark_slot_success(slot_idx)
-                
-                # 注意：这里我们立即返回 StreamingResponse，它会在后台运行 frame_processor
-                # 并发计数的 release 稍微有点复杂，因为 streaming 是异步的
-                # 为了简化，我们在“连接建立成功”后就释放并发计数(假设长连接占用不计入高频 API 限制)，
-                # 或者您可以选择在 generator 结束时释放。这里选择立即释放以允许吞吐。
                 await release_slot(slot_idx) 
                 
                 return StreamingResponse(
@@ -337,20 +381,15 @@ async def reverse_proxy_endpoint(request: Request):
                 )
 
         except Exception as e:
-            # 捕获所有错误（网络、超时、HTTP错误）
             last_error = e
             logger.error(f"Attempt {attempt+1} failed: {e}")
             if slot_idx != -1:
-                # 释放并发计数
                 await release_slot(slot_idx)
-                # 如果是网络层面的报错（非 403），也可以选择性熔断
                 if isinstance(e, (asyncio.TimeoutError)):
                      mark_slot_failure(slot_idx)
             
-            # 如果还有重试机会，稍微等待一下避免瞬间雪崩
             if attempt < MAX_RETRIES - 1:
                 await asyncio.sleep(random.uniform(0.5, 1.5))
             continue
 
-    # 如果重试耗尽
     raise HTTPException(status_code=502, detail=f"All upstream retries failed. Last error: {str(last_error)}")

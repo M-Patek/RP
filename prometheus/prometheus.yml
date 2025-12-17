@@ -1,34 +1,25 @@
 global:
 
-统一的抓取间隔
+  # 统一的抓取间隔
+  scrape_interval: 15s
 
-scrape_interval: 15s
-
-告警规则文件路径（如果需要设置告警）
-
-rule_files:
-
-- 'alerting_rules.yml'
+  # 告警规则文件路径（如果需要设置告警）
+  rule_files:
+    # - 'alerting_rules.yml'
 
 scrape_configs:
 
-抓取 FastAPI Gateway 服务
+  # 抓取 FastAPI Gateway 服务
+  job_name: 'gemini-proxy-app'
 
-job_name: 'gemini-proxy-app'
+  # 使用 docker-compose service name 和端口
+  static_configs:
+    targets: ['gemini-proxy:8000']
+  
+  # 假设你的 FastAPI app 暴露了一个 /metrics 端点 (已由 Instrumentator 自动添加)
+  metrics_path: /metrics
 
-使用 docker-compose service name 和端口
-
-static_configs:
-
-targets: ['gemini-proxy:8000']
-
-假设你的 FastAPI app 暴露了一个 /metrics 端点
-
-metrics_path: /metrics
-
-抓取 Prometheus 自身的健康度
-
-job_name: 'prometheus'
-static_configs:
-
-targets: ['localhost:9090']
+  # 抓取 Prometheus 自身的健康度
+  job_name: 'prometheus'
+  static_configs:
+    targets: ['localhost:9090']

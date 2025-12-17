@@ -1,8 +1,8 @@
 [
   {
-    "comment": "Slot 1: 美国洛杉矶 (US-LAX) - 严格绑定地域特征",
-    "key": "AIzaSyDxxxx_Key_LAX",
-    "proxy": "http://user:pass@lax-isp.proxy.net:8000",
+    "comment": "Slot 1: 美国洛杉矶 (US-LAX) - 敏感信息已通过环境变量注入",
+    "key": "${GEMINI_API_KEY_LAX}",
+    "proxy": "${PROXY_URL_LAX}",
     "impersonate": "chrome110",
     "max_concurrency": 8,
     "headers": {
@@ -11,9 +11,9 @@
     }
   },
   {
-    "comment": "Slot 2: 日本东京 (JP-TYO) - 严格绑定地域特征",
-    "key": "AIzaSyDxxxx_Key_TYO",
-    "proxy": "http://user:pass@tyo-isp.proxy.net:8000",
+    "comment": "Slot 2: 日本东京 (JP-TYO) - 敏感信息已通过环境变量注入",
+    "key": "${GEMINI_API_KEY_TYO}",
+    "proxy": "${PROXY_URL_TYO}",
     "impersonate": "safari15_5",
     "max_concurrency": 5,
     "headers": {

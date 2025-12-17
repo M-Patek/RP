@@ -1,0 +1,87 @@
+version: '3.8'
+
+services:
+
+1. AI 增强网关核心服务 (FastAPI)
+
+gemini-proxy:
+build: .
+container_name: gemini-proxy-service
+restart: always
+ports:
+- "8000:8000"
+environment:
+# ⚠️ 注意：这里必须和 app/main.py 中的 REDIS_PASSWORD 变量匹配
+- REDIS_PASSWORD=my_secure_redis_password
+- TZ=Asia/Shanghai
+depends_on:
+- redis
+- prometheus
+networks:
+- backend-network # 私有网络 (Redis)
+- default         # 公网/监控网络
+# 启用 ulimits 优化高并发性能
+ulimits:
+nofile:
+soft: 65535
+hard: 65535
+
+2. Redis Session Manager (隔离墙)
+
+redis:
+image: redis:7.0-alpine
+container_name: gemini-proxy-redis
+restart: always
+# 注入密码，实现认证和网络隔离双重保护
+command: redis-server --appendonly yes --requirepass my_secure_redis_password
+environment:
+- TZ=Asia/Shanghai
+volumes:
+- redis_data:/data
+expose:
+- 6379 # 仅对内部网络暴露
+networks:
+- backend-network # 关键：设置为 internal
+
+3. Prometheus Monitoring System
+
+prometheus:
+image: prom/prometheus:latest
+container_name: gemini-proxy-prometheus
+restart: always
+volumes:
+- ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+- prometheus_data:/prometheus
+command:
+- '--config.file=/etc/prometheus/prometheus.yml'
+- '--storage.tsdb.path=/prometheus'
+ports:
+- "9090:9090"
+networks:
+- default
+
+4. Grafana Visualization Dashboard
+
+grafana:
+image: grafana/grafana:latest
+container_name: gemini-proxy-grafana
+restart: always
+volumes:
+- grafana_data:/var/lib/grafana
+ports:
+- "3000:3000"
+depends_on:
+- prometheus
+networks:
+- default
+
+volumes:
+redis_data:
+prometheus_data:
+grafana_data:
+
+networks:
+backend-network:
+internal: true # 物理隔离墙
+default:
+external: false

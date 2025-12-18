@@ -1,203 +1,196 @@
 import os
 import random
-import logging
 import secrets
-import signal
 import time
-import asyncio
+import uuid
+import logging
 from typing import AsyncGenerator, Optional
-from collections import OrderedDict
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request, HTTPException, Depends
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import StreamingResponse
-from curl_cffi.requests import AsyncSession # [Cloud] 核心: 使用 curl_cffi 抗指纹
+from curl_cffi.requests import AsyncSession
 from redis.asyncio import Redis as AsyncRedis
 from prometheus_fastapi_instrumentator import Instrumentator
 
-# 导入核心模块
-from app.core import (
-    slot_manager, ProxyRequest, UPSTREAM_URL, 
-    MAX_BUFFER_SIZE, FRAME_DELIMITER
-)
+# [New] 引入日志基建
+from app.logger_setup import setup_logging, request_id_ctx
+from app.core import slot_manager, ProxyRequest, UPSTREAM_URL
 
-# --- 日志配置 ---
-logger = logging.getLogger("GeminiTactical-Cloud")
+# --- 初始化 ---
+# 1. 启动结构化日志
+setup_logging(service_name="SWARM-Gateway")
+logger = logging.getLogger(__name__)
 
-# --- 全局配置 ---
 GATEWAY_SECRET = os.getenv("GATEWAY_SECRET")
-REDIS_HOST = "redis"
-REDIS_PORT = 6379
+REDIS_HOST = os.getenv("REDIS_HOST", "redis")
 REDIS_PASSWORD = os.getenv("REDIS_PASSWORD")
+
 REDIS_CLIENT: Optional[AsyncRedis] = None
+IMPERSONATE_LIST = ["chrome110", "chrome111", "safari15_5", "edge101"]
 
-# --- 指纹库 ---
-IMPERSONATE_VARIANTS = [
-    "chrome110", "chrome111", "chrome112", 
-    "safari15_5", "safari16_0",
-    "edge101", "edge103"
-]
-
-def get_ja3_perturbed_impersonate(base_impersonate: str) -> str:
-    """[Cloud] 指纹随机化逻辑"""
-    if "chrome" in base_impersonate:
-        return random.choice([v for v in IMPERSONATE_VARIANTS if "chrome" in v])
-    elif "safari" in base_impersonate:
-        return random.choice([v for v in IMPERSONATE_VARIANTS if "safari" in v])
-    return base_impersonate
-
-# --- 核心流式处理 (修复了生命周期 Bug) ---
-async def smart_frame_processor(
-    session: AsyncSession, 
-    resp: AsyncSession, 
-    slot_idx: int, 
-    redis: AsyncRedis
-) -> AsyncGenerator[str, None]:
-    """
-    负责处理流式响应，并在结束时安全关闭 Session。
-    """
-    buffer = b""
-    # 使用 curl_cffi 的 aiter_content
-    iterator = resp.aiter_content().__aiter__()
-    
-    dynamic_timeout = 10.0
-    last_chunk_time = time.time()
-
+async def smart_frame_processor(session: AsyncSession, resp, slot_idx: int, redis: AsyncRedis) -> AsyncGenerator[str, None]:
     try:
-        while True:
-            try:
-                chunk = await asyncio.wait_for(iterator.__anext__(), timeout=dynamic_timeout)
-                
-                # 动态心跳
-                now = time.time()
-                if (now - last_chunk_time) < 2.0: dynamic_timeout = 15.0
-                else: dynamic_timeout = 8.0
-                last_chunk_time = now
-
-                buffer += chunk
-                
-                # DoS 防御
-                if len(buffer) > MAX_BUFFER_SIZE:
-                    raise HTTPException(status_code=500, detail="Response too large")
-
-                while FRAME_DELIMITER in buffer:
-                    line, buffer = buffer.split(FRAME_DELIMITER, 1)
-                    if not line.strip(): continue
-                    yield f"data: {line.decode('utf-8')}\n\n"
-                    
-            except asyncio.TimeoutError:
-                yield ": keep-alive\n\n"
-                continue
-            except StopAsyncIteration:
-                break
-        
-        if buffer.strip():
-            yield f"data: {buffer.decode('utf-8')}\n\n"
-        yield "data: [DONE]\n\n"
-
+        async for chunk in resp.aiter_content():
+            if not chunk: continue
+            yield chunk.decode('utf-8')
     except Exception as e:
-        logger.error(f"Stream Error: {e}")
-        if isinstance(e, HTTPException): 
-            yield f"data: [ERROR] {e.detail}\n\n"
+        logger.error(f"stream_interrupted", extra={"extra_data": {"slot": slot_idx, "error": str(e)}})
+        yield f"\n[GATEWAY_ERROR] {str(e)}\n"
     finally:
-        # 🌟 关键修复: 确保流结束或异常时关闭 Session，并释放 Redis 锁
-        if session:
-            await session.close()
-        # 释放 Slot 并汇报成功 (流式只要能开始通常算成功，或者需要更细粒度的判断)
-        # 这里简化为只要没抛出 HTTP 异常就算 200，实际可优化
+        await session.close()
+        # 依然需要记录成功释放，哪怕是异常结束
         await slot_manager.report_status(slot_idx, 200)
         await slot_manager.release_slot(slot_idx, redis)
-        logger.debug(f"Slot {slot_idx} released & Session closed.")
+        logger.info(f"slot_released", extra={"extra_data": {"slot": slot_idx}})
 
-
-# --- FastAPI Setup ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup
-    slot_manager.load_config()
     global REDIS_CLIENT
-    REDIS_CLIENT = AsyncRedis(host=REDIS_HOST, port=REDIS_PORT, password=REDIS_PASSWORD, decode_responses=True)
-    # 监听重载信号 (Linux only)
-    try:
-        signal.signal(signal.SIGHUP, lambda s, f: slot_manager.load_config())
-    except AttributeError:
-        pass
+    # 启动时加载一次配置
+    slot_manager.load_config()
     
+    REDIS_CLIENT = AsyncRedis(
+        host=REDIS_HOST, 
+        password=REDIS_PASSWORD, 
+        decode_responses=True,
+        socket_timeout=5
+    )
+    logger.info("gateway_ready")
     yield
-    
-    # Shutdown
     if REDIS_CLIENT:
         await REDIS_CLIENT.close()
 
-app = FastAPI(title="Gemini Tactical Gateway (Cloud)", lifespan=lifespan)
+app = FastAPI(title="S.W.A.R.M. Gateway", lifespan=lifespan)
 Instrumentator().instrument(app).expose(app)
+
+# --- 2. [中间件] 全链路追踪 (Tracing Middleware) ---
+@app.middleware("http")
+async def structured_logging_middleware(request: Request, call_next):
+    # A. 继承上游 Trace ID 或生成新 ID
+    trace_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+    token = request_id_ctx.set(trace_id)
+    
+    start_time = time.time()
+    try:
+        response = await call_next(request)
+        
+        process_time = (time.time() - start_time) * 1000
+        # 记录结构化访问日志
+        logger.info(
+            "request_completed", 
+            extra={
+                "extra_data": {
+                    "method": request.method,
+                    "path": request.url.path,
+                    "status_code": response.status_code,
+                    "duration_ms": round(process_time, 2),
+                    "client_ip": request.client.host
+                }
+            }
+        )
+        # 返回 ID 给客户端
+        response.headers["X-Request-ID"] = trace_id
+        return response
+    finally:
+        request_id_ctx.reset(token)
+
+# --- 3. [业务接口] ---
 
 @app.post("/v1/chat/completions")
 async def tactical_proxy(request: Request, body: ProxyRequest):
-    # 1. 鉴权
+    # 鉴权
     if GATEWAY_SECRET:
         auth = request.headers.get("Authorization") or ""
         if not secrets.compare_digest(auth, f"Bearer {GATEWAY_SECRET}"):
             raise HTTPException(401, "Unauthorized")
 
-    redis = REDIS_CLIENT
-    
-    # 2. 调度
-    slot_idx = await slot_manager.get_best_slot(redis)
+    if not REDIS_CLIENT:
+        raise HTTPException(500, "Redis Connection Lost")
+
+    # 调度
+    slot_idx = await slot_manager.get_best_slot(REDIS_CLIENT)
     slot = slot_manager.slots[slot_idx]
     
-    # 3. 准备 Session (Cloud 版为了抗指纹，每个请求新建 Session)
-    # 注意：不要使用 async with，因为要将 session 所有权移交给 StreamingResponse
-    session = None
+    # 记录决策日志
+    logger.info("slot_selected", extra={"extra_data": {"slot_id": slot_idx, "model": body.model}})
+
+    session = AsyncSession(
+        impersonate=slot.get("impersonate", random.choice(IMPERSONATE_LIST)),
+        proxies={"http": slot.get("proxy"), "https": slot.get("proxy")} if slot.get("proxy") else None,
+        timeout=120
+    )
+    
     try:
-        key = slot["key"]
-        proxy = slot.get("proxy")
-        final_impersonate = get_ja3_perturbed_impersonate(slot.get("impersonate", "chrome110"))
-        
-        request_headers = OrderedDict([("Content-Type", "application/json")])
-        if "headers" in slot: request_headers.update(slot["headers"])
-        
-        url_with_key = f"{UPSTREAM_URL}?key={key}"
-        proxies = {"http": proxy, "https": proxy} if proxy else None
-
-        logger.info(f"Slot {slot_idx} Active | Impersonate: {final_impersonate}")
-
-        session = AsyncSession(
-            impersonate=final_impersonate,
-            proxies=proxies,
-            timeout=120
-        )
-            
-        # 发起请求
         resp = await session.post(
-            url_with_key,
-            headers=request_headers,
-            json=body.model_dump(), # 使用 Pydantic 导出字典
+            f"{UPSTREAM_URL}?key={slot['key']}", 
+            json=body.model_dump(exclude_none=True), 
             stream=True
         )
 
-        # 错误速判 (非流式阶段的错误)
         if resp.status_code != 200:
-            error_text = await resp.text()
-            await session.close() # 立即关闭
+            err_text = await resp.text()
+            await session.close()
             await slot_manager.report_status(slot_idx, resp.status_code)
-            await slot_manager.release_slot(slot_idx, redis)
+            await slot_manager.release_slot(slot_idx, REDIS_CLIENT)
+            logger.error("upstream_error", extra={"extra_data": {"status": resp.status_code, "body": err_text}})
+            raise HTTPException(resp.status_code, detail=f"Gemini API Error: {err_text}")
             
-            if resp.status_code in [403, 429, 400]:
-                 raise HTTPException(status_code=resp.status_code, detail=f"API Error: {error_text}")
-            raise HTTPException(status_code=resp.status_code, detail=f"Upstream Error: {error_text}")
-
-        # 成功连接，移交控制权
         return StreamingResponse(
-            smart_frame_processor(session, resp, slot_idx, redis),
-            media_type="text/event-stream"
+            smart_frame_processor(session, resp, slot_idx, REDIS_CLIENT),
+            media_type="application/json"
         )
 
     except Exception as e:
-        # 发生异常（如连接失败），手动清理
-        if session: await session.close()
-        await slot_manager.release_slot(slot_idx, redis)
-        await slot_manager.report_status(slot_idx, 500)
-        logger.error(f"Proxy Init Failed: {e}")
+        await session.close()
+        await slot_manager.release_slot(slot_idx, REDIS_CLIENT)
         if isinstance(e, HTTPException): raise e
-        raise HTTPException(status_code=502, detail="Gateway Error")
+        logger.error("gateway_proxy_error", exc_info=True)
+        raise HTTPException(502, detail=f"Bad Gateway: {str(e)}")
+
+# --- 4. [管理接口] ---
+
+@app.get("/v1/pool/status")
+async def get_pool_status(request: Request):
+    """
+    [自检接口] Brain 用此接口检查连通性
+    """
+    if GATEWAY_SECRET:
+        auth = request.headers.get("Authorization") or ""
+        if not secrets.compare_digest(auth, f"Bearer {GATEWAY_SECRET}"):
+            raise HTTPException(401, "Unauthorized")
+
+    status_report = []
+    for idx, slot in enumerate(slot_manager.slots):
+        state = slot_manager.states.get(idx, {})
+        status_report.append({
+            "slot_id": idx,
+            "weight": state.get("weight", 0),
+            "failures": state.get("failures", 0),
+            "is_active": state.get("weight", 0) > 0,
+            "cooldown_remaining": max(0, state.get("cool_down_until", 0) - time.time())
+        })
+    
+    return {
+        "version": slot_manager.config_version,
+        "pool_size": len(slot_manager.slots),
+        "active_slots": len([s for s in status_report if s['is_active']]),
+        "slots": status_report
+    }
+
+@app.post("/v1/admin/reload_config")
+async def reload_configuration(request: Request):
+    """
+    [热重载接口] 管理员手动触发配置更新
+    """
+    if GATEWAY_SECRET:
+        auth = request.headers.get("Authorization") or ""
+        if not secrets.compare_digest(auth, f"Bearer {GATEWAY_SECRET}"):
+            raise HTTPException(401, "Admin Access Required")
+    
+    result = slot_manager.load_config()
+    
+    if result["status"] == "success":
+        return {"message": "Reloaded successfully 喵!", "meta": result}
+    else:
+        raise HTTPException(status_code=422, detail=result["details"])

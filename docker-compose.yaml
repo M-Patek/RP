@@ -1,115 +1,71 @@
 version: '3.8'
 
 # -------------------------------------------------------------------
-# 🌩️ S.W.A.R.M. Gateway - Cloud Production Compose
-# 专为东京节点设计：无状态、自动重启、环境注入
-# [Update] Added Redis Service & Config Volume
-# [Update] Added Prometheus Monitoring Stack
+# 🌩️ S.W.A.R.M. Gateway - Tokyo Optimized Compose
+# 策略：单 IP 直连、多 Key 轮询、高性能监控
 # -------------------------------------------------------------------
 
 services:
   gateway:
-    # 构建上下文：当前目录
     build: .
-    
-    container_name: swarm_gateway_prod
-    
-    # 【核心策略】永远自动重启
+    container_name: swarm_gateway_tokyo
     restart: always
-    
-    # 端口映射
     ports:
       - "8000:8000"
-    
-    # 环境变量注入
     env_file:
       - .env
-    
     environment:
       - LOG_LEVEL=INFO
-      - ENVIRONMENT=production
-      # 确保连接到下方定义的 redis 服务
-      - REDIS_HOST=redis
-    
-    # [FIX 4] 网络别名设置
-    # 为了匹配 prometheus.yml 中的 "targets: ['gemini-proxy:8000']"
-    # 我们必须让这个服务能响应 "gemini-proxy" 这个主机名
+    # 网络别名，用于 Prometheus 抓取
     networks:
       default:
         aliases:
           - gemini-proxy
-
-    # [FIX 1] 挂载配置文件
-    # 必须把本地的 config.json 映射进去，否则网关没有 Key 可用！
     volumes:
       - ./config.json:/app/config.json
-    
-    # [FIX 2] 依赖关系
-    # 确保 Redis 先启动，网关再启动
     depends_on:
       - redis
-
-    # 健康检查
+    # 增加 DNS 优化，使用 Google DNS 以获得最快的 API 解析速度
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 10s
-
     deploy:
       resources:
         limits:
-          cpus: '1.5'
-          memory: 1024M
-        reservations:
-          memory: 256M
+          cpus: '1.0'
+          memory: 512M
 
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "20m"
-        max-file: "3"
-
-  # [FIX 3] 添加 Redis 服务
   redis:
     image: redis:7-alpine
-    container_name: swarm_redis_db
+    container_name: swarm_redis_tokyo
     restart: always
-    # 使用 .env 中的密码启动 Redis
-    # 注意：这里使用了 Shell 变量替换，Docker 会自动读取 .env 中的值
     command: redis-server --requirepass ${REDIS_PASSWORD}
     volumes:
       - redis_data:/data
-    env_file:
-      - .env
     healthcheck:
       test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
       interval: 30s
       timeout: 5s
       retries: 3
 
-  # [FIX 5] 添加 Prometheus 监控服务
-  # 既然您准备了 prometheus.yml，这里必须把监控跑起来喵！
+  # 监控组件：实时观察 10 个 Key 的 429 (Rate Limit) 触发情况
   prometheus:
     image: prom/prometheus:v2.45.0
-    container_name: swarm_monitor
+    container_name: swarm_monitor_tokyo
     restart: always
     ports:
       - "9090:9090"
     volumes:
-      # 挂载本地的 prometheus 目录中的配置文件
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
-      # 持久化监控数据
       - prometheus_data:/prometheus
-    command:
-      - '--config.file=/etc/prometheus/prometheus.yml'
-      - '--storage.tsdb.path=/prometheus'
-      - '--storage.tsdb.retention.time=15d'
     depends_on:
       - gateway
 
-# 定义持久化卷，防止数据丢失
 volumes:
   redis_data:
   prometheus_data:

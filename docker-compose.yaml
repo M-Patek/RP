@@ -31,6 +31,7 @@ services:
       - REDIS_PORT=6379
       # 设置时区，方便看日志
       - TZ=Asia/Shanghai
+      - GATEWAY_SECRET=sk-
     depends_on:
       redis:
         condition: service_healthy

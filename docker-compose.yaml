@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # 1. 数据库服务 (Redis)
   redis:
@@ -24,14 +22,15 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      # 挂载配置文件
+      # 挂载配置文件 (注意：云端的 config.json 不需要填 proxy)
       - ./config.json:/app/config.json
     environment:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
-      # 设置时区，方便看日志
-      - TZ=Asia/Shanghai
-      - GATEWAY_SECRET=sk-
+      # 东京节点使用东京时间 (如需北京时间可改为 Asia/Shanghai)
+      - TZ=Asia/Tokyo
+      # [安全密钥] 必填！防止未授权访问
+      - GATEWAY_SECRET=sk-swarm-prod-6f1d8e2a4b9c0d5e1f2a3b4c5d6e7f8a
     depends_on:
       redis:
         condition: service_healthy
@@ -45,11 +44,11 @@ services:
     restart: always
 
   # 3. 监控服务 (Prometheus)
-  # 云端标配，配合 prometheus.yml 使用
   prometheus:
     image: prom/prometheus:latest
     container_name: swarm_monitor
     volumes:
+      # 必须确保仓库里有 prometheus.yml 文件
       - ./prometheus.yml:/etc/prometheus/prometheus.yml
       - prometheus_data:/prometheus
     ports:

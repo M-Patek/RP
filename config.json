@@ -1,72 +1,12 @@
 [
-  {
-    "comment": "Slot 01 - Tokyo Direct",
-    "key": "AIzaSy...Key_01",
-    "proxy": null,
-    "impersonate": "chrome110",
-    "max_concurrency": 1
-  },
-  {
-    "comment": "Slot 02 - Tokyo Direct",
-    "key": "AIzaSy...Key_02",
-    "proxy": null,
-    "impersonate": "chrome111",
-    "max_concurrency": 1
-  },
-  {
-    "comment": "Slot 03 - Tokyo Direct",
-    "key": "AIzaSy...Key_03",
-    "proxy": null,
-    "impersonate": "safari15_5",
-    "max_concurrency": 1
-  },
-  {
-    "comment": "Slot 04 - Tokyo Direct",
-    "key": "AIzaSy...Key_04",
-    "proxy": null,
-    "impersonate": "edge101",
-    "max_concurrency": 1
-  },
-  {
-    "comment": "Slot 05 - Tokyo Direct",
-    "key": "AIzaSy...Key_05",
-    "proxy": null,
-    "impersonate": "chrome110",
-    "max_concurrency": 1
-  },
-  {
-    "comment": "Slot 06 - Tokyo Direct",
-    "key": "AIzaSy...Key_06",
-    "proxy": null,
-    "impersonate": "chrome111",
-    "max_concurrency": 1
-  },
-  {
-    "comment": "Slot 07 - Tokyo Direct",
-    "key": "AIzaSy...Key_07",
-    "proxy": null,
-    "impersonate": "safari15_5",
-    "max_concurrency": 1
-  },
-  {
-    "comment": "Slot 08 - Tokyo Direct",
-    "key": "AIzaSy...Key_08",
-    "proxy": null,
-    "impersonate": "edge101",
-    "max_concurrency": 1
-  },
-  {
-    "comment": "Slot 09 - Tokyo Direct",
-    "key": "AIzaSy...Key_09",
-    "proxy": null,
-    "impersonate": "chrome110",
-    "max_concurrency": 1
-  },
-  {
-    "comment": "Slot 10 - Tokyo Direct",
-    "key": "AIzaSy...Key_10",
-    "proxy": null,
-    "impersonate": "chrome111",
-    "max_concurrency": 1
-  }
+  { "comment": "Slot 01", "key": "YOUR_KEY_01", "proxy": null, "impersonate": "chrome110", "max_concurrency": 1 },
+  { "comment": "Slot 02", "key": "YOUR_KEY_02", "proxy": null, "impersonate": "chrome111", "max_concurrency": 1 },
+  { "comment": "Slot 03", "key": "YOUR_KEY_03", "proxy": null, "impersonate": "safari15_5", "max_concurrency": 1 },
+  { "comment": "Slot 04", "key": "YOUR_KEY_04", "proxy": null, "impersonate": "edge101", "max_concurrency": 1 },
+  { "comment": "Slot 05", "key": "YOUR_KEY_05", "proxy": null, "impersonate": "chrome110", "max_concurrency": 1 },
+  { "comment": "Slot 06", "key": "YOUR_KEY_06", "proxy": null, "impersonate": "chrome111", "max_concurrency": 1 },
+  { "comment": "Slot 07", "key": "YOUR_KEY_07", "proxy": null, "impersonate": "safari15_5", "max_concurrency": 1 },
+  { "comment": "Slot 08", "key": "YOUR_KEY_08", "proxy": null, "impersonate": "edge101", "max_concurrency": 1 },
+  { "comment": "Slot 09", "key": "YOUR_KEY_09", "proxy": null, "impersonate": "chrome110", "max_concurrency": 1 },
+  { "comment": "Slot 10", "key": "YOUR_KEY_10", "proxy": null, "impersonate": "chrome111", "max_concurrency": 1 }
 ]

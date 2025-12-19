@@ -10,14 +10,14 @@
     "comment": "Slot 02",
     "key": "  ",
     "proxy": null,
-    "impersonate": "chrome111",
+    "impersonate": "chrome110",
     "max_concurrency": 1
   },
   {
     "comment": "Slot 03",
     "key": "  ",
     "proxy": null,
-    "impersonate": "safari15_5",
+    "impersonate": "chrome110",
     "max_concurrency": 1
   }
 ]

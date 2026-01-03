@@ -1,24 +1,24 @@
 [
   {
     "comment": "Slot 01 - Replace with your actual key",
-    "key": "AIzaSy_YOUR_ACTUAL_API_KEY_HERE_001",
-    "proxy": null,
+    "key": "",
+    "proxy": "http://127.0.0.1:7890",
     "impersonate": "chrome110",
     "max_concurrency": 5,
     "is_active": true
   },
   {
     "comment": "Slot 02 - Reserve",
-    "key": "AIzaSy_YOUR_ACTUAL_API_KEY_HERE_002",
-    "proxy": null,
+    "key": "",
+    "proxy": "http://127.0.0.1:7890",
     "impersonate": "chrome110",
     "max_concurrency": 5,
     "is_active": true
   },
   {
     "comment": "Slot 03 - Reserve",
-    "key": "AIzaSy_YOUR_ACTUAL_API_KEY_HERE_003",
-    "proxy": null,
+    "key": "",
+    "proxy": "http://127.0.0.1:7890",
     "impersonate": "chrome110",
     "max_concurrency": 5,
     "is_active": true
